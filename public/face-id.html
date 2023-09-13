@@ -1,0 +1,220 @@
+<style>
+  .flip-x {
+    transform: scaleX(-1);
+  }
+</style>
+<script src="/face-api/dist/face-api.js"></script>
+
+<div>
+  <button id="startBtn" onclick="startCam()">start cam</button>
+  <button id="detectBtn" disabled onclick="detectFace()">
+    detect face (loading models...)
+  </button>
+  <input id="nicknameInput" placeholder="nickname" />
+  <button onclick="registerFace()">register face</button>
+</div>
+<div>
+  <button onclick="stopCam()">stop cam</button>
+</div>
+
+<video id="camVideo" class="flip-x"></video>
+<canvas id="camCanvas" class="flip-x"></canvas>
+<canvas id="camCanvas2" class="flip-x"></canvas>
+
+<div id="facePreview"></div>
+<div id="loginResult"></div>
+
+<script>
+  // console.log(faceapi)
+
+  let camContext = camCanvas.getContext('2d', { willReadFrequently: true })
+  let camContext2 = camCanvas2.getContext('2d', { willReadFrequently: true })
+
+  let modelPath = '/face-api/model/'
+  let minConfidence = 0.2
+  let maxResults = 5
+
+  let optionsSSDMobileNet
+
+  let stream
+
+  let isLooping = false
+
+  async function setupFaceAPI() {
+    // load face-api models
+    // log('Models loading');
+    // await faceapi.nets.tinyFaceDetector.load(modelPath); // using ssdMobilenetv1
+    await faceapi.nets.ssdMobilenetv1.load(modelPath)
+    await faceapi.nets.ageGenderNet.load(modelPath)
+    await faceapi.nets.faceLandmark68Net.load(modelPath)
+    await faceapi.nets.faceRecognitionNet.load(modelPath)
+    await faceapi.nets.faceExpressionNet.load(modelPath)
+    optionsSSDMobileNet = new faceapi.SsdMobilenetv1Options({
+      minConfidence,
+      maxResults,
+    })
+    // check tf engine state
+    console.log(
+      `Models loaded: ${faceapi.tf.engine().state.numTensors} tensors`,
+    )
+    detectBtn.disabled = false
+    detectBtn.textContent = 'detect face'
+  }
+
+  setupFaceAPI()
+
+  async function startCam() {
+    let constraints = {
+      audio: false,
+      video: {
+        facingMode: 'user',
+        resizeMode: 'crop-and-scale',
+        width: {
+          ideal: 400,
+        },
+        height: {
+          ideal: 400,
+        },
+      },
+    }
+    stream = await navigator.mediaDevices.getUserMedia(constraints)
+    camVideo.srcObject = stream
+    camVideo.onloadeddata = () => {
+      console.log('video size:', camVideo.videoWidth, 'x', camVideo.videoHeight)
+
+      camCanvas.width = camVideo.videoWidth
+      camCanvas.height = camVideo.videoHeight
+
+      camCanvas2.width = camVideo.videoWidth
+      camCanvas2.height = camVideo.videoHeight
+
+      camVideo.play()
+    }
+  }
+
+  function stopCam() {
+    stream.getTracks().forEach(track => {
+      track.stop()
+    })
+  }
+
+  let detectFaceResult
+  let faceData
+  async function detectFace() {
+    isLooping = true
+    camContext2.drawImage(camVideo, 0, 0)
+
+    detectFaceResult = await faceapi
+      .detectAllFaces(camVideo, optionsSSDMobileNet)
+      .withFaceLandmarks()
+      .withFaceExpressions()
+      .withFaceDescriptors()
+      .withAgeAndGender()
+
+    if (!isLooping) {
+      return
+    }
+
+    let imageData = camContext2.getImageData(
+      0,
+      0,
+      camCanvas.width,
+      camCanvas.height,
+    )
+    camContext.putImageData(imageData, 0, 0)
+
+    // console.log('detected faces:', detectFaceResult)
+    facePreview.textContent = ''
+    let faceDataList = []
+    for (let face of detectFaceResult) {
+      let box = face.detection.box
+
+      let canvas = document.createElement('canvas')
+      canvas.className = 'flip-x'
+      canvas.width = box.width
+      canvas.height = box.height
+
+      let context = canvas.getContext('2d')
+      let imageData = camContext.getImageData(
+        box.x,
+        box.y,
+        box.width,
+        box.height,
+      )
+      context.putImageData(imageData, 0, 0)
+
+      facePreview.appendChild(canvas)
+
+      let faceData = {
+        age: face.age,
+        gender: face.gender,
+        genderProbability: face.genderProbability,
+        descriptor: face.descriptor,
+        width: box.width,
+        height: box.height,
+        area: box.width * box.height,
+        canvas,
+      }
+      // console.log('face data:', faceData)
+      faceDataList.push(faceData)
+    }
+    for (let face of detectFaceResult) {
+      let box = face.detection.box
+      camContext.strokeStyle = 'red'
+      camContext.beginPath()
+      camContext.rect(box.x, box.y, box.width, box.height)
+      camContext.stroke()
+    }
+    faceData = faceDataList.sort((a, b) => b.area - a.area)[0]
+    loginFace(faceData)
+    requestAnimationFrame(detectFace)
+  }
+
+  async function registerFace() {
+    console.log('submit:', faceData)
+    isLooping = false
+    facePreview.textContent = ''
+    facePreview.appendChild(faceData.canvas)
+    let blob = await new Promise(resolve =>
+      faceData.canvas.toBlob(resolve, 'image/webp'),
+    )
+    console.log('blob size:', blob.size)
+    let formData = new FormData()
+    formData.set('image', blob, 'face.webp')
+    formData.set('width', faceData.width)
+    formData.set('height', faceData.height)
+    formData.set('descriptor', faceData.descriptor)
+    formData.set('nickname', nicknameInput.value)
+    let res = await fetch('/register', {
+      method: 'POST',
+      body: formData,
+    })
+    let json = await res.json()
+    console.log('register result:', json)
+  }
+
+  async function loginFace(faceData) {
+    let res = await fetch('/login', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        width: faceData.width,
+        height: faceData.height,
+        descriptor: faceData.descriptor.toString(),
+      }),
+    })
+    let json = await res.json()
+    // console.log('login result:', json)
+    if (json.error) {
+      loginResult.textContent = json.error
+      return
+    }
+    isLooping = false
+    facePreview.textContent = ''
+    facePreview.appendChild(faceData.canvas)
+    loginResult.textContent = `Welcome back, ${json.nickname} (user_id: ${json.user_id})`
+  }
+</script>
