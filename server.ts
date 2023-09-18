@@ -111,6 +111,7 @@ function matchUser(queryDescriptor: Float32Array) {
     let label = String(face.user_id)
     return new LabeledFaceDescriptors(label, [descriptor])
   })
+  if (inputs.length == 0) return []
   let faceMatcher = new FaceMatcher(inputs, distanceThreshold)
   let faceMatch = faceMatcher.findBestMatch(queryDescriptor)
   return faceMatch
